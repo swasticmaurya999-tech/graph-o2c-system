@@ -8,9 +8,7 @@ async function loadCustomers() {
   const session = getSession();
 
   const data = readFolderJSONL("data/business_partners");
-  // console.log("Sample customer row:", data[0]);
-  const paymentData = readFolderJSONL("data/payments_accounts_receivable");
-  console.log("Sample payment:", paymentData[0]); 
+  // console.log("Sample customer row:", data[0]); 
   for (const bp of data) {
     if (!bp.businessPartner) continue;
 
@@ -27,7 +25,7 @@ async function loadCustomers() {
   }
 
   await session.close();
-  console.log("Customers loaded ✅");
+  console.log("Customers loaded ");
 }
 
 /**
@@ -61,7 +59,7 @@ async function loadSalesOrders() {
   }
 
   await session.close();
-  console.log("Sales Orders loaded ✅");
+  console.log("Sales Orders loaded ");
 }
 
 async function loadDeliveries() {
@@ -87,7 +85,7 @@ async function loadDeliveries() {
   }
 
   await session.close();
-  console.log("Deliveries loaded ✅");
+  console.log("Deliveries loaded ");
 }
 
 
@@ -115,7 +113,7 @@ async function linkOrdersToDeliveries() {
   }
 
   await session.close();
-  console.log("Order → Delivery linked ✅");
+  console.log("Order → Delivery linked ");
 }
 
 async function loadInvoices() {
@@ -146,14 +144,14 @@ async function loadInvoices() {
   }
 
   await session.close();
-  console.log("Invoices loaded ✅");
+  console.log("Invoices loaded ");
 }
 async function loadPayments() {
   const session = getSession();
 
   const data = readFolderJSONL("data/payments_accounts_receivable");
 
-  console.log("Sample payment row:", data[0]);
+  // console.log("Sample payment row:", data[0]);
 
   for (const p of data) {
     if (!p.accountingDocument || !p.customer) continue;
@@ -176,7 +174,7 @@ async function loadPayments() {
   }
 
   await session.close();
-  console.log("Payments loaded ✅");
+  console.log("Payments loaded ");
 }
 
 async function linkPaymentsToJournal() {
@@ -201,7 +199,7 @@ async function linkPaymentsToJournal() {
   }
 
   await session.close();
-  console.log("Payment → Journal linked ✅");
+  console.log("Payment → Journal linked ");
 }
 
 
