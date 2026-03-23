@@ -16,7 +16,6 @@ function isValidQuestion(question: string): boolean {
     question.toLowerCase().includes(word)
   );
 }
-
 //  Generate human-readable answer
 function generateAnswer(question: string, data: any[]) {
   const q = question.toLowerCase();
