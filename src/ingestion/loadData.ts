@@ -203,9 +203,8 @@ async function linkPaymentsToJournal() {
   await session.close();
   console.log("Payment → Journal linked ✅");
 }
-/**
- * 🔥 MAIN FUNCTION
- */
+
+
 async function main() {
   try {
     await loadCustomers();
