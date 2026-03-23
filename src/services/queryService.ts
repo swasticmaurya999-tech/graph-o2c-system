@@ -42,7 +42,6 @@ function generateAnswer(question: string, data: any[]) {
 
   return `Query executed successfully. Found ${data.length} results.`;
 }
-
 //  Validate generated Cypher (basic safety)
 function validateCypher(query: string) {
   const forbiddenPatterns = ["exists(", "```", "DROP", "DELETE"];
