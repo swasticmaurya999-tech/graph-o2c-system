@@ -1,4 +1,7 @@
+// Neo4j connection setup
+
 import neo4j from "neo4j-driver";
+
 import dotenv from "dotenv";
 
 dotenv.config();
