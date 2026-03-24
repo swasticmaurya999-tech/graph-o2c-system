@@ -1,10 +1,13 @@
 import express, { Request, Response } from "express";
+import cors from "cors";
 import { getSession } from "./config/neo4j";
 import queryRoute from "./routes/query";
+import graphRoute from "./routes/graph";
 
 const app = express();
 
 // Middleware
+app.use(cors());
 app.use(express.json());
 
 // Health check
@@ -27,8 +30,9 @@ app.get("/test", async (req: Request, res: Response) => {
   }
 });
 
-// Query route
+// Routes
 app.use("/query", queryRoute);
+app.use("/graph", graphRoute);
 
 app.listen(3000, () => {
   console.log("Server running on port 3000 🚀");
