@@ -7,22 +7,22 @@ type Message = {
   text: string;
 };
 
-type ChatPanelProps = {
+interface ChatPanelProps {
   onResult: (ids: string[]) => void;
-};
+}
 
 export default function ChatPanel({ onResult }: ChatPanelProps) {
   const [query, setQuery] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // 🔥 Show agent intro on first load
+  // Intro message on initial load
   useEffect(() => {
     setMessages([
       {
         id: "intro",
         role: "bot",
-        text: "Hi! I can help you analyze the Order to Cash process. Ask me about orders, payments, deliveries, or any relationships in the graph.",
+        text: "🚀 Welcome to Order-to-Cash Analytics!\n\nI can help you:\n• Find orders by customer or ID\n• Trace complete order flows (Order → Delivery → Invoice → Payment)\n• Identify delivery and billing gaps\n• Get customer and product summaries\n• Analyze business processes\n\nTry asking: 'Show me sales order 740584' or 'Which orders were delivered but not billed?'",
       },
     ]);
   }, []);
@@ -39,32 +39,42 @@ export default function ChatPanel({ onResult }: ChatPanelProps) {
         question: query,
       });
 
+      // Handle errors
+      if (res.data.error) {
+        const errorMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: "bot",
+          text: `⚠️ ${res.data.error}`,
+        };
+        setMessages((prev) => [...prev, errorMsg]);
+        setLoading(false);
+        setQuery("");
+        return;
+      }
+
+      // Show answer
       const botMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: "bot",
-        text: res.data.answer,
+        text: res.data.answer || "No answer generated.",
       };
 
       setMessages((prev) => [...prev, botMsg]);
 
-      const ids: string[] = res.data.data
-        .map((d: any) => {
-          const key = Object.keys(d)[0];
-          return d[key]?.id;
-        })
-        .filter(Boolean);
+      // Extract IDs for visualization - prioritize the new ids array
+      const ids: string[] = res.data.ids || [];
 
       if (ids.length > 0) {
         onResult(ids);
       }
     } catch (error) {
-      const botMsg: Message = {
+      console.error("Query error:", error);
+      const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: "bot",
-        text: "Sorry, I encountered an error. Please try again.",
+        text: "❌ Something went wrong while processing your request. Please try again.",
       };
-
-      setMessages((prev) => [...prev, botMsg]);
+      setMessages((prev) => [...prev, errorMsg]);
     }
 
     setLoading(false);
@@ -99,13 +109,15 @@ export default function ChatPanel({ onResult }: ChatPanelProps) {
             <div
               style={{
                 maxWidth: "85%",
-                padding: "12px 16px",
-                borderRadius: "12px",
+                padding: "10px 12px",
+                borderRadius: "8px",
                 background: msg.role === "user" ? "#2563eb" : "#e5e7eb",
                 color: msg.role === "user" ? "white" : "#1f2937",
-                fontSize: "14px",
+                fontSize: "13px",
                 lineHeight: "1.5",
                 wordWrap: "break-word",
+                whiteSpace: "pre-wrap",
+                overflowWrap: "break-word",
               }}
             >
               {msg.text}
@@ -116,10 +128,11 @@ export default function ChatPanel({ onResult }: ChatPanelProps) {
           <div style={{ display: "flex", justifyContent: "flex-start" }}>
             <div
               style={{
-                padding: "12px 16px",
-                borderRadius: "12px",
+                padding: "10px 12px",
+                borderRadius: "8px",
                 background: "#e5e7eb",
                 color: "#6b7280",
+                fontSize: "13px",
               }}
             >
               Dodge AI is thinking...
