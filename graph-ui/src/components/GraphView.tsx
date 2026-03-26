@@ -17,17 +17,20 @@ export default function GraphView({ highlightedIds = [] }: any) {
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
 
   useEffect(() => {
-    axios.get(`${API_BASE_URL}/graph`).then((res) => {
+    axios
+      .get(`${API_BASE_URL}/graph`)
+      .then((res: any) => {
       console.log("Graph data:", res.data);
       setFullData(res.data);
       setData(res.data);
       setGraphError(null);
-    }).catch((err) => {
+      })
+      .catch((err: any) => {
       console.error("Graph fetch error:", err);
       setGraphError(
         "Failed to load graph data from backend. Please ensure the backend is running on port 3000."
       );
-    });
+      });
   }, []);
 
   function buildNeighborhoodGraph(
