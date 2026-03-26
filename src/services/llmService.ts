@@ -1,166 +1,375 @@
 import Groq from "groq-sdk";
-import { getSchema } from "../config/neo4j";
 
 const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
 });
 
-// ✅ Define schema type
-type SchemaType = {
-  nodes: string[];
-  relationships: string[];
-};
+function extractSalesOrderId(question: string): string | null {
+  // Examples: "trace sales order 740584", "so 740584"
+  const m = question.match(/(?:order|so|sales\s+order)\s+(\d+)/i);
+  return m?.[1] || null;
+}
 
-// ✅ Fallback constants
-const DEFAULT_NODES = [
-  "Customer",
-  "SalesOrder",
-  "Delivery",
-  "Invoice",
-  "Payment",
-  "JournalEntry",
-  "OrderItem",
-  "Product",
-];
+function extractCustomerId(question: string): string | null {
+  // Examples: "customer 310000108", "customer id 310000108", "for customer 310000108"
+  const m =
+    question.match(
+      /(?:customer\s*id|customer|for\s+customer|of\s+customer)\s*(?:id\s*)?(\d+)/i
+    ) || null;
+  return m?.[1] || null;
+}
 
-const DEFAULT_RELATIONSHIPS = [
-  "(Customer)-[:PLACED]->(SalesOrder)",
-  "(SalesOrder)-[:FULFILLED_BY]->(Delivery)",
-  "(Delivery)-[:BILLED_AS]->(Invoice)",
-  "(Invoice)-[:RECORDED_AS]->(JournalEntry)",
-  "(Customer)-[:MADE_PAYMENT]->(Payment)",
-  "(Payment)-[:RECORDED_AS]->(JournalEntry)",
-  "(SalesOrder)-[:CONTAINS]->(OrderItem)",
-  "(OrderItem)-[:FOR_PRODUCT]->(Product)",
-];
+function extractInvoiceId(question: string): string | null {
+  // Examples:
+  // - "Trace the full flow of billing document 90504248"
+  // - "invoice 90504248"
+  // - "bill 90504248"
+  const m =
+    question.match(
+      /(?:billing\s*document|billing|invoice|bill)\s*(?:id\s*)?(\d+)/i
+    ) || question.match(/(?:doc)\s+(\d+)/i);
+  return m?.[1] || null;
+}
 
-/**
- * 🔹 Generate Cypher Query
- */
-export async function generateCypher(question: string): Promise<string> {
-  let schema: SchemaType;
+function isFlowTraceQuestion(question: string): boolean {
+  const q = question.toLowerCase();
+  return q.includes("trace") || q.includes("flow") || q.includes("path");
+}
 
-  try {
-    schema = await getSchema();
-  } catch (err) {
-    console.error("❌ Schema fetch failed:", err);
+function isBillingDocumentTraceQuestion(question: string): boolean {
+  const q = question.toLowerCase();
+  const isTrace = q.includes("trace") || q.includes("flow") || q.includes("path");
+  const mentionsBilling = q.includes("billing") || q.includes("invoice") || q.includes("bill");
+  return isTrace && mentionsBilling;
+}
 
-    // ✅ fallback schema (TYPE SAFE)
-    schema = {
-      nodes: DEFAULT_NODES,
-      relationships: DEFAULT_RELATIONSHIPS,
-    };
-  }
+function buildFlowTraceCypher(salesOrderId: string): string {
+  // Use only validated template edges for the Order-to-Cash flow.
+  return `
+MATCH (o:SalesOrder {id: "${salesOrderId}"})
+OPTIONAL MATCH (o)-[:FULFILLED_BY]->(d:Delivery)
+OPTIONAL MATCH (o)-[:INVOICED]->(i:Invoice)
+OPTIONAL MATCH (i)-[:RECORDED_AS]->(j:JournalEntry)
+RETURN o,d,i,j LIMIT 20
+`.trim();
+}
 
-  // ✅ SAFE ACCESS (no red lines now)
-  const nodes =
-    schema.nodes && schema.nodes.length > 0
-      ? schema.nodes.join(", ")
-      : DEFAULT_NODES.join(", ");
+function buildBillingDocumentFlowTraceCypher(invoiceId: string): string {
+  // Trace flow starting from Invoice (Billing document):
+  // SalesOrder -> Delivery -> Billing(Invoice) -> JournalEntry
+  // Valid edges in this graph:
+  // - SalesOrder-[:INVOICED]->Invoice
+  // - SalesOrder-[:FULFILLED_BY]->Delivery
+  // - Invoice-[:RECORDED_AS]->JournalEntry
+  return `
+MATCH (i:Invoice {id: "${invoiceId}"})
+MATCH (o:SalesOrder)-[:INVOICED]->(i)
+OPTIONAL MATCH (o)-[:FULFILLED_BY]->(d:Delivery)
+OPTIONAL MATCH (i)-[:RECORDED_AS]->(j:JournalEntry)
+RETURN o,d,i,j LIMIT 20
+`.trim();
+}
 
-  const relationships =
-    schema.relationships && schema.relationships.length > 0
-      ? schema.relationships.join("\n")
-      : DEFAULT_RELATIONSHIPS.join("\n");
+function buildDeliveredNotBilledCypher(): string {
+  // Broken flow: delivered (has deliveries) but not billed (no invoice).
+  return `
+MATCH (o:SalesOrder)
+WHERE (o)-[:FULFILLED_BY]->()
+  AND NOT (o)-[:INVOICED]->()
+OPTIONAL MATCH (o)-[:FULFILLED_BY]->(d:Delivery)
+RETURN o.id as orderId, collect(DISTINCT d.id) as deliveryIds
+LIMIT 50
+`.trim();
+}
 
-  const prompt = `
-You are an expert Neo4j Cypher generator.
-
-STRICTLY follow the schema below.
-
-GRAPH SCHEMA:
-Nodes:
-${nodes}
-
-Relationships:
-${relationships}
-
-IMPORTANT RULES:
-- Use ONLY labels and relationships from schema
-- DO NOT invent labels like Order, LineItem, etc.
-
-- Use EXACT labels:
-  SalesOrder, Delivery, Invoice, Payment, JournalEntry, OrderItem, Product, Customer
-
-- Allowed relationships:
-  PLACED, FULFILLED_BY, CONTAINS, BILLED_BY, DELIVERED_BY, INVOICED, PAID_BY, RECORDED_AS, FOR_PRODUCT
-
-- IDs are ALWAYS strings:
-  Example: {id: "740584"}
-
-- NEVER use:
-  exists()
-  size()
-
-- Missing relationship:
-  WHERE NOT (n)-[:REL]->()
-
-- LIMIT 10
-- RETURN ONLY CYPHER
-
----
-
-Examples:
-
-Q: sales order 740584
-MATCH (o:SalesOrder {id: "740584"})
-RETURN o LIMIT 10
-
-Q: orders by customer 320000083
-MATCH (c:Customer {id: "320000083"})-[:PLACED]->(o:SalesOrder)
-RETURN o LIMIT 10
-
-Q: orders not delivered
+function buildNotDeliveredCypher(): string {
+  // Broken flow: no deliveries, but there may be invoices.
+  return `
 MATCH (o:SalesOrder)
 WHERE NOT (o)-[:FULFILLED_BY]->()
-RETURN o LIMIT 10
+OPTIONAL MATCH (o)-[:INVOICED]->(i:Invoice)
+RETURN o.id as orderId, collect(DISTINCT i.id) as invoiceIds
+LIMIT 50
+`.trim();
+}
 
----
+function buildBilledWithoutDeliveryCypher(): string {
+  // Broken flow: billed (has invoices) but not delivered (no delivery edges).
+  return `
+MATCH (o:SalesOrder)
+WHERE (o)-[:INVOICED]->()
+  AND NOT (o)-[:FULFILLED_BY]->()
+OPTIONAL MATCH (o)-[:INVOICED]->(i:Invoice)
+RETURN o.id as orderId, collect(DISTINCT i.id) as invoiceIds
+LIMIT 50
+`.trim();
+}
 
-Question:
+function buildProductAnalysisCypher(): string {
+  // Example: "highest number of billing documents" per product.
+  return `
+MATCH (i:Invoice)-[:CONTAINS]->(ii:InvoiceItem)-[:FOR_PRODUCT]->(p:Product)
+RETURN p.id as productId, count(DISTINCT i.id) as billingDocuments
+ORDER BY billingDocuments DESC
+LIMIT 10
+`.trim();
+}
+
+function buildSalesOrderLookupCypher(salesOrderId: string): string {
+  // Deterministic "show sales order <id>" style lookup, includes product+flow info.
+  return `
+MATCH (o:SalesOrder {id: "${salesOrderId}"})
+OPTIONAL MATCH (o)-[:FULFILLED_BY]->(d:Delivery)
+OPTIONAL MATCH (o)-[:INVOICED]->(i:Invoice)
+OPTIONAL MATCH (i)-[:RECORDED_AS]->(j:JournalEntry)
+OPTIONAL MATCH (o)-[:CONTAINS]->(oi:OrderItem)
+OPTIONAL MATCH (oi)-[:FOR_PRODUCT]->(p:Product)
+RETURN o,d,i,j,oi,p LIMIT 20
+`.trim();
+}
+
+function buildAllCustomersCypher(): string {
+  return `
+MATCH (c:Customer)
+RETURN c LIMIT 50
+`.trim();
+}
+
+function buildCustomerOrdersCypher(customerId: string): string {
+  // Customer -> SalesOrder plus the optional flow to help analytics answers.
+  return `
+MATCH (c:Customer {id: "${customerId}"})-[:PLACED]->(o:SalesOrder)
+OPTIONAL MATCH (o)-[:FULFILLED_BY]->(d:Delivery)
+OPTIONAL MATCH (o)-[:INVOICED]->(i:Invoice)
+OPTIONAL MATCH (i)-[:RECORDED_AS]->(j:JournalEntry)
+OPTIONAL MATCH (o)-[:CONTAINS]->(oi:OrderItem)
+OPTIONAL MATCH (oi)-[:FOR_PRODUCT]->(p:Product)
+RETURN c,o,d,i,j,oi,p LIMIT 100
+`.trim();
+}
+
+/**
+ * 🎯 STEP 1: INTENT CLASSIFICATION (LLM)
+ */
+async function classifyIntent(question: string): Promise<string> {
+  const prompt = `
+Classify the user query into ONE of these labels:
+
+LOOKUP_ORDER
+FLOW_TRACE
+DELIVERED_NOT_BILLED
+NOT_DELIVERED
+PRODUCT_ANALYSIS
+
+Return ONLY the label.
+
+Query:
 ${question}
 `;
 
-  const response = await groq.chat.completions.create({
+  const res = await groq.chat.completions.create({
     model: "llama-3.1-8b-instant",
     messages: [{ role: "user", content: prompt }],
     temperature: 0,
   });
 
-  let cypher = response.choices[0]?.message?.content || "";
-
-  // ✅ CLEAN RESPONSE
-  cypher = cypher
-    .replace(/```cypher/g, "")
-    .replace(/```/g, "")
-    .replace(/Here.*?:/gi, "")
-    .trim();
-
-  // ✅ STRONG VALIDATION
-  const isValid =
-    cypher.toLowerCase().includes("match") &&
-    cypher.toLowerCase().includes("return");
-
-  if (!isValid) {
-    console.warn("⚠️ Invalid Cypher → fallback");
-
-    cypher = `MATCH (o:SalesOrder) RETURN o LIMIT 10`;
-  }
-
-  console.log("\n🧠 Generated Cypher:\n", cypher);
-
-  return cypher;
+  return res.choices[0]?.message?.content?.trim() || "LOOKUP_ORDER";
 }
 
 /**
- * 🔹 Generate Answer
+ * 🎯 STEP 2: SAFE CYPHER GENERATION (NO HALLUCINATION)
+ */
+export async function generateCypher(question: string): Promise<string> {
+  // Deterministic templates for common question types.
+  // This prevents the LLM from producing subtly wrong relationship paths
+  // (e.g. using Delivery-[:BILLED_AS]->Invoice instead of SalesOrder-[:INVOICED]->Invoice).
+  const lower = question.toLowerCase();
+  const salesOrderId = extractSalesOrderId(question);
+  const invoiceId = extractInvoiceId(question);
+  const customerId = extractCustomerId(question);
+
+  // Prefer billing-document trace when the question mentions billing/invoice.
+  if (isBillingDocumentTraceQuestion(question) && invoiceId) {
+    const cypher = buildBillingDocumentFlowTraceCypher(invoiceId);
+    console.log("🛡️ Deterministic BILLING_DOCUMENT_FLOW_TRACE Cypher:\n", cypher);
+    return cypher;
+  }
+
+  // Order-to-cash trace when question explicitly traces a sales order id.
+  if (isFlowTraceQuestion(question) && salesOrderId && !isBillingDocumentTraceQuestion(question)) {
+    const cypher = buildFlowTraceCypher(salesOrderId);
+    console.log("🛡️ Deterministic FLOW_TRACE Cypher:\n", cypher);
+    return cypher;
+  }
+
+  if (
+    lower.includes("delivered") &&
+    (lower.includes("not billed") ||
+      (lower.includes("without") &&
+        (lower.includes("billed") || lower.includes("invoice") || lower.includes("billing"))))
+  ) {
+    const cypher = buildDeliveredNotBilledCypher();
+    console.log("🛡️ Deterministic DELIVERED_NOT_BILLED Cypher:\n", cypher);
+    return cypher;
+  }
+
+  if (
+    (lower.includes("billed") || lower.includes("invoiced") || lower.includes("invoice") || lower.includes("billing")) &&
+    lower.includes("without") &&
+    lower.includes("delivery") &&
+    customerId == null // no-op, just keeps this block distinct
+  ) {
+    const cypher = buildBilledWithoutDeliveryCypher();
+    console.log("🛡️ Deterministic BILLED_WITHOUT_DELIVERY Cypher:\n", cypher);
+    return cypher;
+  }
+
+  if (
+    lower.includes("not delivered") ||
+    lower.includes("undelivered") ||
+    (lower.includes("without") && lower.includes("delivery"))
+  ) {
+    const cypher = buildNotDeliveredCypher();
+    console.log("🛡️ Deterministic NOT_DELIVERED Cypher:\n", cypher);
+    return cypher;
+  }
+
+  if (
+    (lower.includes("highest") || lower.includes("most") || lower.includes("top")) &&
+    lower.includes("billing") &&
+    lower.includes("product")
+  ) {
+    const cypher = buildProductAnalysisCypher();
+    console.log("🛡️ Deterministic PRODUCT_ANALYSIS Cypher:\n", cypher);
+    return cypher;
+  }
+
+  // "Show me sales order <id>" (lookup + optional flow + products)
+  if (
+    salesOrderId &&
+    (lower.includes("show") ||
+      lower.includes("detail") ||
+      lower.includes("describe") ||
+      lower.includes("information") ||
+      lower.includes("sales order"))
+  ) {
+    const cypher = buildSalesOrderLookupCypher(salesOrderId);
+    console.log("🛡️ Deterministic SALES_ORDER_LOOKUP Cypher:\n", cypher);
+    return cypher;
+  }
+
+  // Customer list
+  if (lower.includes("all customers") || (lower.includes("list") && lower.includes("customers"))) {
+    const cypher = buildAllCustomersCypher();
+    console.log("🛡️ Deterministic ALL_CUSTOMERS Cypher:\n", cypher);
+    return cypher;
+  }
+
+  // Orders made by a given customer id
+  if (
+    customerId &&
+    (lower.includes("orders made") ||
+      (lower.includes("all") && lower.includes("orders")) ||
+      (lower.includes("orders") && lower.includes("customer")) ||
+      lower.includes("placed"))
+  ) {
+    const cypher = buildCustomerOrdersCypher(customerId);
+    console.log("🛡️ Deterministic CUSTOMER_ORDERS Cypher:\n", cypher);
+    return cypher;
+  }
+
+  const prompt = `
+You are a Neo4j Cypher generator.
+
+---
+
+REAL GRAPH (STRICT — DO NOT BREAK):
+
+(Customer)-[:PLACED]->(SalesOrder)
+
+(SalesOrder)-[:FULFILLED_BY]->(Delivery)
+
+(SalesOrder)-[:INVOICED]->(Invoice)   ⭐ ONLY VALID WAY TO GET INVOICE
+
+(Invoice)-[:RECORDED_AS]->(JournalEntry)
+
+(SalesOrder)-[:CONTAINS]->(OrderItem)
+(OrderItem)-[:FOR_PRODUCT]->(Product)
+
+---
+
+🚨 CRITICAL RULES (VERY IMPORTANT)
+
+1. NEVER use Delivery → Invoice
+   ❌ (Delivery)-[:BILLED_AS]->(Invoice)
+   THIS IS INVALID FOR QUERYING
+
+2. ALWAYS use:
+   ✅ (SalesOrder)-[:INVOICED]->(Invoice)
+
+3. ALWAYS start from SalesOrder
+
+4. ALWAYS use OPTIONAL MATCH for flows
+
+5. IDs are strings → {id: "740584"}
+
+6. NEVER create loops
+
+---
+
+✅ CORRECT PATTERN:
+
+MATCH (o:SalesOrder {id: "740584"})
+OPTIONAL MATCH (o)-[:FULFILLED_BY]->(d:Delivery)
+OPTIONAL MATCH (o)-[:INVOICED]->(i:Invoice)
+OPTIONAL MATCH (i)-[:RECORDED_AS]->(j:JournalEntry)
+RETURN o,d,i,j LIMIT 20
+
+---
+
+User Question:
+${question}
+
+---
+
+Return ONLY Cypher.
+`;
+
+  const response = await groq.chat.completions.create({
+    model: "llama-3.1-8b-instant",
+    messages: [
+      {
+        role: "system",
+        content: "You generate ONLY valid Cypher queries using given templates.",
+      },
+      {
+        role: "user",
+        content: prompt,
+      },
+    ],
+    temperature: 0,
+  });
+
+  let cypher = response.choices[0]?.message?.content || "";
+
+  cypher = cypher
+    .replace(/```cypher/g, "")
+    .replace(/```/g, "")
+    .trim();
+
+  console.log("🧠 FINAL CYPHER:\n", cypher);
+
+  return cypher;
+}
+/**
+ * 🎯 STEP 3: ANSWER GENERATION
  */
 export async function generateAnswer(
   question: string,
   data: any[]
 ): Promise<string> {
   if (!data || data.length === 0) {
-    return "No matching records found in the dataset.";
+    return "No exact match found. Try a different query or check IDs.";
   }
 
   const prompt = `
@@ -170,9 +379,9 @@ Question:
 ${question}
 
 Data:
-${JSON.stringify(data).slice(0, 1500)}
+${JSON.stringify(data).slice(0, 2000)}
 
-Give a short insight.
+Give a short, clear answer.
 `;
 
   const res = await groq.chat.completions.create({

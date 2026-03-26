@@ -3,8 +3,12 @@ import axios from "axios";
 import ForceGraph2D from "react-force-graph-2d";
 
 export default function GraphView({ highlightedIds = [] }: any) {
+  const [fullData, setFullData] = useState<any>({ nodes: [], links: [] });
   const [data, setData] = useState<any>({ nodes: [], links: [] });
   const [selectedNode, setSelectedNode] = useState<any>(null);
+  const [expandedNodeId, setExpandedNodeId] = useState<string | null>(null);
+  const [hideGranularOverlay, setHideGranularOverlay] = useState(false);
+  const [graphError, setGraphError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const fgRef = useRef<any>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
@@ -12,9 +16,71 @@ export default function GraphView({ highlightedIds = [] }: any) {
   useEffect(() => {
     axios.get("http://localhost:3000/graph").then((res) => {
       console.log("Graph data:", res.data);
+      setFullData(res.data);
       setData(res.data);
+      setGraphError(null);
+    }).catch((err) => {
+      console.error("Graph fetch error:", err);
+      setGraphError(
+        "Failed to load graph data from backend. Please ensure the backend is running on port 3000."
+      );
     });
   }, []);
+
+  function buildNeighborhoodGraph(
+    base: any,
+    nodeId: string,
+    hop: number = 1
+  ): { nodes: any[]; links: any[] } {
+    if (!base?.nodes?.length || !base?.links?.length) return { nodes: [], links: [] };
+
+    const nodesById = new Map<string, any>();
+    for (const n of base.nodes) {
+      if (n?.id != null) nodesById.set(String(n.id), n);
+    }
+
+    // Treat graph as undirected for neighborhood expansion.
+    const adjacency = new Map<string, Set<string>>();
+    for (const l of base.links) {
+      const s = String(l.source);
+      const t = String(l.target);
+      if (!adjacency.has(s)) adjacency.set(s, new Set());
+      if (!adjacency.has(t)) adjacency.set(t, new Set());
+      adjacency.get(s)!.add(t);
+      adjacency.get(t)!.add(s);
+    }
+
+    const start = String(nodeId);
+    const seen = new Set<string>([start]);
+    let frontier = new Set<string>([start]);
+
+    for (let step = 0; step < hop; step++) {
+      const next = new Set<string>();
+      for (const cur of frontier) {
+        const neigh = adjacency.get(cur);
+        if (!neigh) continue;
+        for (const v of neigh) {
+          if (!seen.has(v)) {
+            seen.add(v);
+            next.add(v);
+          }
+        }
+      }
+      frontier = next;
+    }
+
+    const nodes = Array.from(seen)
+      .map((id) => nodesById.get(id))
+      .filter(Boolean);
+
+    const links = base.links.filter((l: any) => {
+      const s = String(l.source);
+      const t = String(l.target);
+      return seen.has(s) && seen.has(t);
+    });
+
+    return { nodes, links };
+  }
 
   useEffect(() => {
     const updateDimensions = () => {
@@ -50,6 +116,36 @@ export default function GraphView({ highlightedIds = [] }: any) {
     }
   }, [data, dimensions]);
 
+  // Auto-expand if exactly one node is highlighted by a query.
+  useEffect(() => {
+    if (!highlightedIds || highlightedIds.length !== 1) return;
+    const id = highlightedIds[0];
+    setExpandedNodeId(id);
+    // Open the node details card for the highlighted entity.
+    const nodeObj = fullData?.nodes?.find((n: any) => String(n?.id) === String(id));
+    setSelectedNode(nodeObj ?? null);
+    // If granular overlay is hidden, show only the neighborhood; otherwise keep full view.
+    if (hideGranularOverlay && id) {
+      const neighborhood = buildNeighborhoodGraph(fullData, id, 1);
+      setData(neighborhood);
+    } else {
+      setData(fullData);
+    }
+  }, [highlightedIds, fullData, hideGranularOverlay]);
+
+  // When user toggles granular overlay or changes expanded node, re-derive the view.
+  useEffect(() => {
+    if (!expandedNodeId) {
+      setData(fullData);
+      return;
+    }
+    if (!hideGranularOverlay) {
+      setData(fullData);
+      return;
+    }
+    setData(buildNeighborhoodGraph(fullData, expandedNodeId, 1));
+  }, [expandedNodeId, hideGranularOverlay, fullData]);
+
   return (
     <div 
       ref={containerRef}
@@ -61,6 +157,53 @@ export default function GraphView({ highlightedIds = [] }: any) {
         overflow: "hidden"
       }}
     >
+      {/* GRAPH OVERLAY CONTROLS */}
+      <div
+        style={{
+          position: "absolute",
+          top: 12,
+          left: 12,
+          zIndex: 5,
+          display: "flex",
+          gap: 8,
+          pointerEvents: "auto",
+        }}
+      >
+        <button
+          onClick={() => {
+            setExpandedNodeId(null);
+            setSelectedNode(null);
+            setData(fullData);
+          }}
+          style={{
+            background: "rgba(255,255,255,0.9)",
+            border: "1px solid #e5e7eb",
+            borderRadius: 8,
+            padding: "6px 10px",
+            fontSize: 12,
+            cursor: "pointer",
+            boxShadow: "0 10px 25px rgba(0,0,0,0.06)",
+          }}
+        >
+          Minimize
+        </button>
+        <button
+          onClick={() => setHideGranularOverlay((v) => !v)}
+          style={{
+            background: hideGranularOverlay ? "#111827" : "rgba(255,255,255,0.9)",
+            color: hideGranularOverlay ? "white" : "#111827",
+            border: hideGranularOverlay ? "1px solid #111827" : "1px solid #e5e7eb",
+            borderRadius: 8,
+            padding: "6px 10px",
+            fontSize: 12,
+            cursor: "pointer",
+            boxShadow: "0 10px 25px rgba(0,0,0,0.06)",
+          }}
+        >
+          {hideGranularOverlay ? "Show Full Graph" : "Hide Granular Overlay"}
+        </button>
+      </div>
+
       {data.nodes.length > 0 && dimensions.width > 0 ? (
         <ForceGraph2D
           ref={fgRef}
@@ -80,13 +223,29 @@ export default function GraphView({ highlightedIds = [] }: any) {
             ctx.lineWidth = 1;
             ctx.stroke();
           }}
-          linkColor={() => "rgba(150, 150, 150, 0.25)"}
-          linkWidth={1}
+          linkColor={(link: any) => {
+            const s = String(link.source);
+            const t = String(link.target);
+            const isHighlighted =
+              highlightedIds.includes(s) || highlightedIds.includes(t);
+            return isHighlighted ? "rgba(239, 68, 68, 0.8)" : "rgba(150, 150, 150, 0.25)";
+          }}
+          linkWidth={(link: any) => {
+            const s = String(link.source);
+            const t = String(link.target);
+            const isHighlighted =
+              highlightedIds.includes(s) || highlightedIds.includes(t);
+            return isHighlighted ? 2 : 1;
+          }}
           enableNodeDrag={true}
           enableZoomInteraction={true}
           enablePanInteraction={true}
           onNodeClick={(node) => {
             setSelectedNode(node);
+            setExpandedNodeId(node?.id != null ? String(node.id) : null);
+            if (hideGranularOverlay) {
+              setData(buildNeighborhoodGraph(fullData, String(node.id), 1));
+            }
           }}
           onNodeHover={(node) => {
             if (containerRef.current) {
@@ -105,7 +264,7 @@ export default function GraphView({ highlightedIds = [] }: any) {
             fontSize: "16px"
           }}
         >
-          Loading graph data...
+          {graphError ? graphError : "Loading graph data..."}
         </div>
       )}
 
@@ -114,8 +273,9 @@ export default function GraphView({ highlightedIds = [] }: any) {
         <div
           style={{
             position: "absolute",
-            top: 20,
-            left: 20,
+            top: 80,
+            left: "50%",
+            transform: "translateX(-50%)",
             background: "white",
             padding: "16px",
             borderRadius: "12px",

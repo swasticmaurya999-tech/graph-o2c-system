@@ -407,7 +407,28 @@ async function linkFinance() {
 
   await session.close();
 }
+async function linkDeliveriesToInvoices() {
+  const session = getSession();
+  const items = readFolderJSONL("data/billing_document_items");
 
+  for (const item of items) {
+    if (!item.referenceSdDocument || !item.billingDocument) continue;
+
+    await session.run(
+      `
+      MERGE (d:Delivery {id: $did})
+      MERGE (i:Invoice {id: $iid})
+      MERGE (d)-[:BILLED_AS]->(i)
+      `,
+      {
+        did: item.referenceSdDocument,
+        iid: item.billingDocument,
+      }
+    );
+  }
+
+  await session.close();
+}
 /**
  * 🚀 MAIN
  */
@@ -432,7 +453,7 @@ async function main() {
   await loadJournalEntries();
   await loadPayments();
   await linkFinance();
-
+  await linkDeliveriesToInvoices();
   console.log("\n✅ CLEAN GRAPH READY");
 }
 
