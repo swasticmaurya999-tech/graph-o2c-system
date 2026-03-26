@@ -1,46 +1,62 @@
-# Graph-Based Order-to-Cash Analytics
+# Graph-Based Order-to-Cash Analytics (Graph + LLM Query)
 
-A graph-based data modeling + natural-language query system for the Order-to-Cash process.
-It unifies fragmented business documents (Sales Orders, Deliveries, Billing Documents/Invoices, Journal Entries, Payments, Customers, Products)
-into a Neo4j graph and provides:
+This project converts a multi-table Order-to-Cash dataset into a **Neo4j context graph** and provides an **LLM-powered query interface** with guardrails.
 
-- A React UI to visualize and explore the graph
-- A chat interface to ask questions in natural language
-- An LLM-to-Cypher layer (with guardrails) that generates dataset-grounded answers
+It includes:
+
+- **Backend**: Node + Express API that queries Neo4j and returns data-backed answers
+- **Graph ingestion**: JSONL → Neo4j nodes/relationships
+- **Frontend**: React (Vite) UI with a graph explorer + chat panel (supports node inspection and query-based highlights)
+
+---
 
 ## Live Demo
 
-Add your deployed URL here before submission.
+- **Frontend (UI)**: `<ADD YOUR VERCEL LINK>`
+- **Backend (API)**: `<ADD YOUR RENDER LINK>`
 
-## Architecture
+> The UI is deployed separately from the API. The UI calls the API via `VITE_API_BASE_URL`.
 
-### Backend (Node + Express)
+---
 
-Endpoints:
+## Repository Structure
 
-- `GET /graph`  
-  Returns `{ nodes, links }` for the frontend graph renderer.
-- `POST /query`  
-  Accepts `{ "question": "..." }` and returns:
-  - `cypher`: the generated Cypher query
-  - `data`: raw matched records
-  - `answer`: short natural-language response grounded in the returned `data`
-  - `ids`: extracted entity ids used for graph highlighting
+Backend (repo root):
 
-### Graph Modeling (Neo4j)
+- `src/index.ts`: Express app, route wiring (`/query`, `/graph`), optional auto-ingestion
+- `src/config/neo4j.ts`: Neo4j driver/session + schema introspection helper
+- `src/routes/query.ts`: `POST /query`
+- `src/routes/graph.ts`: `GET /graph` and `GET /graph/stats`
+- `src/services/queryService.ts`: guardrails → Cypher generation → Neo4j execution → response shaping
+- `src/services/llmService.ts`: intent-aware Cypher generation + answer generation
+- `src/services/queryValidator.ts`: domain guardrails + Cypher syntax checks
+- `src/ingestion/readJSONL.ts`: JSONL reader
+- `src/ingestion/loadData.ts`: ingestion pipeline (creates nodes + edges)
 
-Nodes (labels):
+Frontend (`graph-ui/`):
+
+- `graph-ui/src/App.tsx`: layout and draggable resizer between graph and chat
+- `graph-ui/src/components/GraphView.tsx`: graph visualization, node inspection, expand/neighborhood view
+- `graph-ui/src/components/ChatPanel.tsx`: chat UI and query calls
+
+---
+
+## Graph Model (Neo4j)
+
+### Node Labels
 
 - `Customer`
 - `SalesOrder`
 - `OrderItem`
 - `Delivery`, `DeliveryItem`
-- `Invoice`, `InvoiceItem`
+- `Invoice`, `InvoiceItem`  (billing documents)
 - `JournalEntry`
 - `Payment`
 - `Product`
 
-Core relationships used for flow tracing:
+All entities use a normalized `id` property (strings in the dataset).
+
+### Core Relationships (used by “trace” queries)
 
 - `(Customer)-[:PLACED]->(SalesOrder)`
 - `(SalesOrder)-[:FULFILLED_BY]->(Delivery)`
@@ -48,103 +64,290 @@ Core relationships used for flow tracing:
 - `(Invoice)-[:RECORDED_AS]->(JournalEntry)`
 - `(SalesOrder)-[:CONTAINS]->(OrderItem)`
 - `(OrderItem)-[:FOR_PRODUCT]->(Product)`
+
+Item-level relationships:
+
+- `(Delivery)-[:CONTAINS]->(DeliveryItem)`
+- `(DeliveryItem)-[:FOR_PRODUCT]->(Product)`
 - `(Invoice)-[:CONTAINS]->(InvoiceItem)`
 - `(InvoiceItem)-[:FOR_PRODUCT]->(Product)`
+- `(OrderItem)-[:DELIVERED_BY]->(DeliveryItem)`
+- `(OrderItem)-[:BILLED_BY]->(InvoiceItem)`
 
-### LLM-to-Cypher with Guardrails
+Finance linking:
 
-Key components:
+- `(Invoice)-[:RECORDED_AS]->(JournalEntry)`
+- `(Payment)-[:RECORDED_AS]->(JournalEntry)`
 
-- `src/services/llmService.ts`
-  - Intent-aware Cypher generation
-  - Deterministic Cypher templates for critical intents (flow tracing, delivered/billed gaps, and common analyses)
-  - Falls back to LLM Cypher generation for less common questions
-- `src/services/queryValidator.ts`
-  - Domain keyword guardrails (rejects unrelated prompts)
-  - Cypher syntax safety checks
-- `src/services/queryService.ts`
-  - Executes Cypher against Neo4j
-  - Normalizes Neo4j integer values to JS numbers
-  - Produces the final response payload
+> Note: ingestion also creates `(Delivery)-[:BILLED_AS]->(Invoice)` for exploration, but **flow tracing and analytics intentionally use `SalesOrder-[:INVOICED]->Invoice`** as the canonical billing link. This avoids incorrect joins and makes guardrails enforce a single “source of truth” for tracing.
 
-## Data Ingestion
+---
 
-Ingestion is implemented in `src/ingestion/loadData.ts` and reads JSONL files from the `data/` folder.
+## Backend API
 
-Optional auto-ingestion:
+### `GET /graph`
 
-- Set `AUTO_INGEST=true` in the backend environment
-- On startup, if Neo4j is empty, ingestion will run automatically.
+Returns a UI-friendly graph snapshot:
+
+- `nodes`: `{ id, label, ...properties }`
+- `links`: `{ source, target, type }`
+
+Implementation: `src/routes/graph.ts`
+
+### `GET /graph/stats`
+
+Returns counts by label and total relationships.
+
+### `POST /query`
+
+Request:
+
+```json
+{ "question": "trace sales order 740584" }
+```
+
+Response:
+
+- `cypher`: Cypher executed
+- `data`: Neo4j records (normalized so Neo4j integers become JS numbers)
+- `answer`: short natural-language answer grounded in `data`
+- `ids`: extracted ids for frontend highlighting
+
+Implementation: `src/routes/query.ts` → `src/services/queryService.ts`
+
+---
+
+## LLM Integration + Guardrails
+
+### Goals
+
+- Translate natural language into **safe Cypher** for *this dataset only*
+- Avoid hallucinated relationships or “general knowledge” replies not grounded in data
+
+### Guardrails (out-of-domain)
+
+`src/services/queryValidator.ts` blocks:
+
+- creative writing, jokes
+- general knowledge questions
+- unrelated topics (weather/news/politics/food, etc.)
+- system prompts unrelated to dataset
+
+If blocked, backend returns a dataset-scoped rejection message.
+
+### Cypher validation (syntax safety)
+
+`validateCypherSyntax()` checks:
+
+- query starts with `MATCH`
+- contains `RETURN`
+- balanced parentheses/brackets
+- no obviously malformed patterns
+
+### Deterministic templates (reduce LLM drift)
+
+The system uses deterministic Cypher for the most important intents, based on regex extraction of IDs:
+
+- Sales order trace: `trace sales order <id>`
+- Billing document trace: `trace billing document <id>` / `invoice <id>`
+- Broken flows:
+  - delivered but not billed
+  - billed but not delivered
+  - not delivered
+- Product billing analysis:
+  - “highest/most billing documents per product”
+- Customer lookups:
+  - list customers
+  - orders for a customer
+
+Why templates?
+
+- Ensures “trace” follows the **correct graph model**
+- Prevents the LLM from generating invalid edges (e.g. Delivery→Invoice) for canonical tracing
+
+Fallback:
+
+- For less common requests, `llmService.ts` still calls Groq (`groq-sdk`) to generate Cypher, but the guardrails/syntax checks remain in place.
+
+### Answer generation
+
+The answer is generated from the returned `data` (truncated to avoid huge prompts). If `data` is empty, the system returns a “No exact match found…” style response.
+
+---
+
+## Data Ingestion Pipeline
+
+Implementation: `src/ingestion/loadData.ts`
+
+Source format: JSONL files under `data/` (downloaded dataset).
+
+High-level steps:
+
+1. Create `Customer` nodes from `data/business_partners`
+2. Create `Product` nodes from `data/sales_order_items` materials
+3. Create `SalesOrder` nodes and link to customers (`PLACED`)
+4. Create `OrderItem` nodes and link to orders/products (`CONTAINS`, `FOR_PRODUCT`)
+5. Create `Delivery` + `DeliveryItem` nodes and link to products
+6. Link orders to deliveries (`FULFILLED_BY`)
+7. Link order items to delivery items (`DELIVERED_BY`)
+8. Create `Invoice` + `InvoiceItem` nodes and link to products
+9. Link order items to invoice items (`BILLED_BY`)
+10. Link orders to invoices (`INVOICED`)
+11. Create `JournalEntry` and `Payment` nodes
+12. Link invoices/payments to journal entries (`RECORDED_AS`)
+
+### Auto-ingestion for fresh deployments
+
+`src/index.ts` supports:
+
+- `AUTO_INGEST=true`: on startup, if Neo4j is empty, ingestion runs automatically.
+
+This makes first-time deployments easier (especially on free-tier services).
+
+---
+
+## Frontend (graph-ui)
+
+Tech: React 19 + Vite + `react-force-graph-2d`
+
+Key features:
+
+- Graph visualization + pan/zoom
+- Node click → node details card (top-center)
+- “Hide Granular Overlay” toggles neighborhood view around the selected/highlighted node
+- Chat panel:
+  - suggestion chips
+  - sends questions to `/query`
+  - highlights returned `ids` on the graph
+- Draggable divider between graph and chat panel
+
+### Frontend configuration
+
+The frontend reads:
+
+- `VITE_API_BASE_URL` (defaults to `http://localhost:3000` in dev)
+
+Used by:
+
+- `graph-ui/src/components/GraphView.tsx`
+- `graph-ui/src/components/ChatPanel.tsx`
+
+---
 
 ## Environment Variables
 
-Backend (`.env`):
+### Backend
 
-- `NEO4J_URI` (example: `bolt://xxxx.databases.neo4j.io:7687`)
+- `NEO4J_URI`
 - `NEO4J_USERNAME`
 - `NEO4J_PASSWORD`
-- `GROQ_API_KEY` (used by the LLM)
-- `AUTO_INGEST=true` (optional; only for fresh deployments)
-- `PORT` (optional; defaults to `3000`)
+- `GROQ_API_KEY`
+- `PORT` (optional; Render sets this automatically)
+- `AUTO_INGEST` (optional; set to `true` for fresh deployments)
 
-Frontend (`graph-ui`):
+### Frontend (build-time)
 
-- `VITE_API_BASE_URL` (example: `https://<your-backend-domain>/`)
-  - The frontend calls `${VITE_API_BASE_URL}/graph` and `${VITE_API_BASE_URL}/query`.
+- `VITE_API_BASE_URL=https://<your-backend-domain>`
+
+---
 
 ## Local Development
 
-### 1) Start Backend
-
-From repo root:
+### Backend
 
 ```powershell
+cd d:\code\graph-system
 npm install
 npm run dev
 ```
 
-Backend runs on `http://localhost:3000`.
+Backend: `http://localhost:3000`
 
-### 2) Start Frontend
+Useful URLs:
+
+- `GET /test`
+- `GET /graph`
+- `GET /graph/stats`
+
+### Frontend
 
 ```powershell
-cd graph-ui
+cd d:\code\graph-system\graph-ui
 npm install
 npm run dev
 ```
 
-Frontend runs on the Vite dev server (typically `http://localhost:5173`).
+Frontend: `http://localhost:5173`
 
-## Deployment Guide (Suggested)
+---
 
-Deploy the frontend and backend separately:
+## Deployment (Render backend + Vercel frontend)
 
-1. **Deploy backend** (Render / Railway / Fly.io)
-   - Build: `npm run build`
-   - Start: `npm run start`
-   - Set required env vars (`NEO4J_*`, `GROQ_API_KEY`, and optionally `AUTO_INGEST=true`)
-2. **Deploy frontend** (Vercel / Netlify)
-   - Build `graph-ui`
-   - Set `VITE_API_BASE_URL` to your backend base URL (e.g. `https://backend.onrender.com`)
-3. Ensure CORS remains enabled on the backend (`cors()` is already used).
+### Backend on Render
 
-## How to Answer Example Queries
+Service type: **Web Service**
 
-- “Show me sales order 740584”
-- “Trace sales order 740584”
-- “Trace the full flow of billing document 90504248”
-- “Which products are associated with the highest number of billing documents?”
-- “Which orders were delivered but not billed?”
+- Build: `npm install && npm run build`
+- Start: `npm run start`
+- Env vars: `NEO4J_*`, `GROQ_API_KEY`, optionally `AUTO_INGEST=true`
 
-Flow trace queries are answered using graph-accurate relationship paths:
+After deploy, verify:
 
-- Sales Order trace: `SalesOrder -> Delivery (FULFILLED_BY) -> Invoice (INVOICED) -> JournalEntry (RECORDED_AS)`
-- Billing document trace starts from `Invoice` to avoid invalid relationship traversal.
+- `https://<render-backend>/test`
+- `https://<render-backend>/graph`
+
+### Frontend on Vercel
+
+Project root: `graph-ui`
+
+- Install: `npm install`
+- Build: `npm run build`
+- Output: `dist`
+- Env var: `VITE_API_BASE_URL=https://<render-backend>`
+
+After deploy, the **Vercel URL is your demo link** (UI).
+
+---
+
+## Example Queries (evaluation)
+
+Try in the chat:
+
+- `Show me sales order 740584`
+- `Trace sales order 740584`
+- `Trace billing document 90504248`
+- `Which products are associated with the highest number of billing documents?`
+- `Which orders were delivered but not billed?`
+- `Which orders were billed but not delivered?`
+- `List all customers`
+- `Orders made by customer 310000108`
+
+---
+
+## Troubleshooting
+
+### Graph is blank / “Loading graph data…”
+
+Check:
+
+- Frontend `VITE_API_BASE_URL` points to the backend
+- Backend has data:
+  - `GET /graph` should return non-empty `nodes` and `links`
+- If Neo4j is empty on first deploy:
+  - set `AUTO_INGEST=true` on backend and redeploy once
+
+### Vercel build fails
+
+Ensure `graph-ui/package.json` contains frontend dependencies (`axios`, etc.) and that the Vercel project root is set to `graph-ui`.
+
+---
 
 ## Submission Checklist
 
-- Working demo link (frontend)
-- Public GitHub repository
-- This README with architecture decisions + prompting strategy + guardrails
-- AI coding session logs/transcripts
+- [ ] Public GitHub repository
+- [ ] Backend deployed (Render URL)
+- [ ] Frontend deployed (Vercel URL) — **demo link**
+- [ ] This README updated with architecture + prompt strategy + guardrails
+- [ ] AI coding session logs/transcripts (Cursor export)
+- [ ] Submission form filled with demo + repo links
 
