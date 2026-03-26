@@ -1,6 +1,9 @@
 import { useState, useEffect } from "react";
 import axios from "axios";
 
+const API_BASE_URL =
+  (import.meta as any).env?.VITE_API_BASE_URL || "http://localhost:3000";
+
 type Message = {
   id: string;
   role: "user" | "bot";
@@ -43,7 +46,7 @@ export default function ChatPanel({ onResult }: ChatPanelProps) {
     setLoading(true);
 
     try {
-      const res = await axios.post("http://localhost:3000/query", {
+      const res = await axios.post(`${API_BASE_URL}/query`, {
         question: query,
       });
 

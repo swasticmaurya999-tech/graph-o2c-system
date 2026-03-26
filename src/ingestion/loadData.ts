@@ -432,7 +432,7 @@ async function linkDeliveriesToInvoices() {
 /**
  * 🚀 MAIN
  */
-async function main() {
+export async function ingestGraph() {
   console.log("🚀 CLEAN INGESTION STARTED\n");
 
   await loadCustomers();
@@ -457,4 +457,8 @@ async function main() {
   console.log("\n✅ CLEAN GRAPH READY");
 }
 
-main();
+// Support running ingestion manually:
+//   npx ts-node src/ingestion/loadData.ts
+if (require.main === module) {
+  void ingestGraph();
+}

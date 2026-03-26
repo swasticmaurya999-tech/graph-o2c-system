@@ -2,6 +2,9 @@ import { useEffect, useState, useRef } from "react";
 import axios from "axios";
 import ForceGraph2D from "react-force-graph-2d";
 
+const API_BASE_URL =
+  (import.meta as any).env?.VITE_API_BASE_URL || "http://localhost:3000";
+
 export default function GraphView({ highlightedIds = [] }: any) {
   const [fullData, setFullData] = useState<any>({ nodes: [], links: [] });
   const [data, setData] = useState<any>({ nodes: [], links: [] });
@@ -14,7 +17,7 @@ export default function GraphView({ highlightedIds = [] }: any) {
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
 
   useEffect(() => {
-    axios.get("http://localhost:3000/graph").then((res) => {
+    axios.get(`${API_BASE_URL}/graph`).then((res) => {
       console.log("Graph data:", res.data);
       setFullData(res.data);
       setData(res.data);
