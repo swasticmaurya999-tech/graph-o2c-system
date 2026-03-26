@@ -1,6 +1,7 @@
 import express, { Request, Response } from "express";
 import cors from "cors";
 import { getSession } from "./config/neo4j";
+
 import queryRoute from "./routes/query";
 import graphRoute from "./routes/graph";
 

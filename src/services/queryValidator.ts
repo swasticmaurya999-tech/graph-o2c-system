@@ -196,3 +196,60 @@ export function classifyQueryType(question: string): string {
   // Standard lookup
   return "LOOKUP";
 }
+
+/**
+ * 🔥 Validate Cypher syntax - catches LLM-generated invalid queries
+ */
+export function validateCypherSyntax(cypher: string): {
+  valid: boolean;
+  errors: string[];
+} {
+  const errors: string[] = [];
+
+  // Basic checks
+  if (!cypher || cypher.length < 15) {
+    errors.push("Query too short to be valid");
+    return { valid: false, errors };
+  }
+
+  // Must have MATCH and RETURN
+  if (!/^\s*MATCH/i.test(cypher.trim())) {
+    errors.push("Query must start with MATCH");
+  }
+
+  if (!/\bRETURN\b/i.test(cypher)) {
+    errors.push("Query must have RETURN clause");
+  }
+
+  // Check for incomplete relationships
+  if (/-\[.*\]\s*$/.test(cypher.trim())) {
+    errors.push("Incomplete relationship pattern at end");
+  }
+
+  // Check for unmatched parentheses
+  const openParen = (cypher.match(/\(/g) || []).length;
+  const closeParen = (cypher.match(/\)/g) || []).length;
+  if (openParen !== closeParen) {
+    errors.push(`Mismatched parentheses: ${openParen} open, ${closeParen} close`);
+  }
+
+  // Check for unmatched brackets
+  const openBracket = (cypher.match(/\[/g) || []).length;
+  const closeBracket = (cypher.match(/\]/g) || []).length;
+  if (openBracket !== closeBracket) {
+    errors.push(`Mismatched brackets: ${openBracket} open, ${closeBracket} close`);
+  }
+
+  // Check for double LIMIT
+  if (/\bLIMIT\s+\d+\s+LIMIT\b/i.test(cypher)) {
+    errors.push("Duplicate LIMIT clause");
+  }
+
+  // Allow multiple WHERE if properly structured with AND/OR
+  // Don't reject - LLM should generate correct WHERE combinations
+
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
+}
